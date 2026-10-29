@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#101820">
+<title>AutoSlide Capture</title>
+<style>
+:root{color-scheme:dark;--bg:#101820;--panel:#1b2834;--text:#f4f7fa;--muted:#aebdca;--accent:#62d6a7;--line:#344554}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+main{max-width:760px;margin:auto;padding:18px 14px 40px}
+h1{font-size:26px;margin:4px 0 5px}p{line-height:1.45;color:var(--muted);margin:6px 0 14px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:14px;margin:12px 0}
+video{width:100%;max-height:56vh;background:#000;border-radius:12px;object-fit:contain;display:block}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+button{border:0;border-radius:12px;padding:13px 15px;font-weight:700;font-size:15px;background:var(--accent);color:#092017;flex:1;min-width:125px}
+button.secondary{background:#2b3b49;color:var(--text);border:1px solid #465b6b}
+button:disabled{opacity:.45}
+label{display:block;color:var(--muted);font-size:14px;margin:12px 0 5px}
+input[type=range]{width:100%}input[type=number]{width:90px;background:#101820;color:white;border:1px solid var(--line);padding:9px;border-radius:8px}
+.status{font-size:14px;color:var(--accent);font-weight:600;min-height:20px}
+small{color:var(--muted);line-height:1.45;display:block}
+#thumbs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.thumb{border:1px solid var(--line);border-radius:8px;overflow:hidden;background:#0a0f14}
+.thumb img{width:100%;display:block;aspect-ratio:16/10;object-fit:contain;background:#000}
+.thumb span{display:block;padding:5px;font-size:12px;color:var(--muted)}
+details summary{cursor:pointer;font-weight:650}
+</style>
+</head>
+<body>
+<main>
+  <h1>AutoSlide Capture</h1>
+  <p>Point your iPhone at the projected slide. This page watches for visual changes and captures stable slides. Keep this page open and the phone awake during the lecture.</p>
+  <div class="panel">
+    <video id="video" autoplay playsinline muted></video>
+    <div class="row">
+      <button id="start">Start camera</button>
+      <button id="capture" class="secondary" disabled>Capture now</button>
+      <button id="stop" class="secondary" disabled>Stop</button>
+    </div>
+    <div class="status" id="status" role="status">Camera not started.</div>
+    <label for="sensitivity">Change sensitivity <span id="sensval">18</span></label>
+    <input id="sensitivity" type="range" min="5" max="45" value="18">
+    <small>Lower = captures smaller changes (more duplicates). Higher = fewer captures. Try 15–25 for a steady projector.</small>
+    <label for="stable">Wait after a slide change</label>
+    <select id="stable" style="width:100%;padding:10px;border-radius:8px;background:#101820;color:white;border:1px solid var(--line)">
+      <option value="900">0.9 seconds</option><option value="1500" selected>1.5 seconds</option><option value="2200">2.2 seconds</option><option value="3000">3 seconds</option>
+    </select>
+  </div>
+  <div class="panel">
+    <strong>Session</strong>
+    <p id="count">0 slides captured</p>
+    <div class="row">
+      <button id="pdf" disabled>Export PDF</button>
+      <button id="zip" class="secondary" disabled>Export slide photos (ZIP)</button>
+    </div>
+    <div class="row">
+      <button id="clear" class="secondary" disabled>Clear session</button>
+    </div>
+    <small>Exports are created on this device. Safari may save them to Files/Downloads. To put images in Photos, open the exported ZIP in Files, extract it, open an image, then use Share → Save Image. This page does not upload your captures.</small>
+  </div>
+  <div class="panel">
+    <strong>Captured slides</strong>
+    <p>Review the thumbnails before exporting.</p>
+    <div id="thumbs"></div>
+  </div>
+  <div class="panel">
+    <details>
+      <summary>Tips for better captures</summary>
+      <p>• Keep the phone stable and frame the entire projection.<br>
+      • Tap Start camera and allow camera access. Use the rear camera if asked.<br>
+      • Avoid people walking in front of the screen; movement can trigger a capture.<br>
+      • Turn on Do Not Disturb and set Auto-Lock to Never temporarily.<br>
+      • This works best when slides change cleanly. Animated content or moving pointers may create extra captures, so review thumbnails before exporting.</p>
+    </details>
+  </div>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script>
+(() => {
+ const video=document.getElementById('video'), status=document.getElementById('status');
+ const startBtn=document.getElementById('start'), capBtn=document.getElementById('capture'), stopBtn=document.getElementById('stop');
+ const pdfBtn=document.getElementById('pdf'), zipBtn=document.getElementById('zip'), clearBtn=document.getElementById('clear');
+ const sens=document.getElementById('sensitivity'), sensval=document.getElementById('sensval'), stableSel=document.getElementById('stable');
+ const count=document.getElementById('count'), thumbs=document.getElementById('thumbs');
+ let stream=null, running=false, timer=null, previous=null, candidate=null, candidateSince=0, lastCapture=0, frames=[], canvas=document.createElement('canvas'), ctx=canvas.getContext('2d',{willReadFrequently:true});
+ let scan=document.createElement('canvas'); scan.width=64; scan.height=36; let sctx=scan.getContext('2d',{willReadFrequently:true});
+ sens.addEventListener('input',()=>sensval.textContent=sens.value);
+ function setStatus(s){status.textContent=s}
+ function updateUI(){count.textContent=frames.length+' slide'+(frames.length===1?'':'s')+' captured';pdfBtn.disabled=zipBtn.disabled=clearBtn.disabled=frames.length===0}
+ async function start(){
+  try{
+   stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}}});
+   video.srcObject=stream; await video.play(); running=true; startBtn.disabled=true;capBtn.disabled=false;stopBtn.disabled=false;
+   previous=null;candidate=null;lastCapture=0;setStatus('Camera running. Point at the slide; automatic detection is active.');
+   timer=setInterval(scanFrame,350);
+  }catch(e){setStatus('Could not start camera: '+(e.message||e)+' — open this page in Safari and allow camera access.')}
+ }
+ function stop(){running=false;if(timer)clearInterval(timer);timer=null;if(stream)stream.getTracks().forEach(t=>t.stop());stream=null;video.srcObject=null;startBtn.disabled=false;capBtn.disabled=true;stopBtn.disabled=true;setStatus('Capture stopped. '+frames.length+' slides saved in this session.')}
+ function signature(){
+  if(!video.videoWidth)return null;
+  sctx.drawImage(video,0,0,scan.width,scan.height);
+  const d=sctx.getImageData(0,0,scan.width,scan.height).data, out=new Uint8Array(scan.width*scan.height);
+  for(let i=0,j=0;i<d.length;i+=4,j++)out[j]=(d[i]*3+d[i+1]*6+d[i+2])/10;
+  return out;
+ }
+ function difference(a,b){if(!a||!b)return 100;let total=0;for(let i=0;i<a.length;i++)total+=Math.abs(a[i]-b[i]);return total/a.length}
+ function scanFrame(){
+  if(!running||video.readyState<2)return;
+  const sig=signature(); if(!sig)return;
+  const diff=difference(sig,previous); previous=sig;
+  const threshold=Number(sens.value);
+  if(diff>threshold){candidate=sig;candidateSince=Date.now();return}
+  if(candidate && Date.now()-candidateSince>=Number(stableSel.value) && Date.now()-lastCapture>1800){
+    const stillDiff=difference(sig,candidate);
+    if(stillDiff<threshold*0.75){captureFrame();candidate=null}
+    else {candidate=sig;candidateSince=Date.now()}
+  }
+ }
+ function captureFrame(){
+  if(!video.videoWidth)return;
+  canvas.width=video.videoWidth;canvas.height=video.videoHeight;ctx.drawImage(video,0,0,canvas.width,canvas.height);
+  const data=canvas.toDataURL('image/jpeg',0.94);
+  frames.push({data,width:canvas.width,height:canvas.height,time:new Date()});lastCapture=Date.now();
+  const div=document.createElement('div');div.className='thumb';
+  const img=document.createElement('img');img.src=data;img.alt='Slide '+frames.length;
+  const label=document.createElement('span');label.textContent='Slide '+frames.length;
+  div.append(img,label);thumbs.appendChild(div);updateUI();setStatus('Captured slide '+frames.length+'.');
+ }
+ function dataURLtoBlob(url){const parts=url.split(',');const mime=parts[0].match(/:(.*?);/)[1];const bin=atob(parts[1]);const arr=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i);return new Blob([arr],{type:mime})}
+ function download(blob,name){const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),30000)}
+ async function exportPDF(){
+  if(!frames.length)return;
+  if(!window.jspdf){setStatus('PDF library did not load. Connect to the internet and reload this page.');return}
+  setStatus('Creating PDF…');
+  try{
+   const {jsPDF}=window.jspdf;const doc=new jsPDF({orientation:'landscape',unit:'pt',format:'a4',compress:true});
+   frames.forEach((f,i)=>{if(i)doc.addPage();const pageW=doc.internal.pageSize.getWidth(),pageH=doc.internal.pageSize.getHeight();const scale=Math.min(pageW/f.width,pageH/f.height);const w=f.width*scale,h=f.height*scale;doc.addImage(f.data,'JPEG',(pageW-w)/2,(pageH-h)/2,w,h,undefined,'FAST')});
+   doc.save('presentation-slides.pdf');setStatus('PDF export started. Check Files/Downloads.');
+  }catch(e){setStatus('PDF export failed: '+e.message)}
+ }
+ async function exportZIP(){
+  if(!frames.length)return;
+  if(!window.JSZip){setStatus('ZIP library did not load. Connect to the internet and reload this page.');return}
+  setStatus('Preparing slide photos…');
+  try{const zip=new JSZip();frames.forEach((f,i)=>zip.file('slide-'+String(i+1).padStart(3,'0')+'.jpg',dataURLtoBlob(f.data)));const blob=await zip.generateAsync({type:'blob'});download(blob,'presentation-slide-photos.zip');setStatus('Photo ZIP export started. Check Files/Downloads.')}
+  catch(e){setStatus('Photo export failed: '+e.message)}
+ }
+ startBtn.addEventListener('click',start);stopBtn.addEventListener('click',stop);capBtn.addEventListener('click',()=>{captureFrame();candidate=null});
+ pdfBtn.addEventListener('click',exportPDF);zipBtn.addEventListener('click',exportZIP);
+ clearBtn.addEventListener('click',()=>{if(confirm('Delete all captured slides from this session?')){frames=[];thumbs.innerHTML='';previous=null;candidate=null;updateUI();setStatus('Session cleared.')}})
+ updateUI();
+ if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){setStatus('This browser does not support camera access. Open in current Safari over HTTPS.')}
+})();
+</script>
+</body>
+</html>
